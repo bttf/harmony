@@ -1,0 +1,11 @@
+.git
+.github
+.vscode
+.env
+_fresh/
+data/
+snaps.db
+snaps/
+local/
+coverage/
+deploy/
