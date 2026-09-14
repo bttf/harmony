@@ -31,10 +31,15 @@ sudo docker system df
 sudo docker image prune -f
 sudo docker builder prune -f
 df -h /
+free -m
 ```
 
 Proceed only with at least 5 GB free. The expected footprint of the Harmony image, the Caddy image
 and the build cache is under 1.5 GB.
+
+`free -m` matters because `deno cache` and `deno task build` run uncapped during the image build;
+the `mem_limit` in `compose.yaml` applies to the running container only. The mirror's Postgres holds
+2 GB of shared buffers, so if memory is tight, build while the mirror is idle.
 
 ### 2. Firewall
 
@@ -50,8 +55,13 @@ sudo ufw allow 443/tcp
 sudo ufw allow 443/udp
 ```
 
-The DigitalOcean cloud firewall is a separate layer: if one is attached to the droplet, add the same
-inbound rules there too, otherwise Caddy cannot complete the ACME challenge.
+Those ufw rules are for consistency, not for reachability: Docker publishes ports through its own
+`DOCKER` chain in `nat`/`FORWARD`, which bypasses ufw's `INPUT` chain, so the containers are reachable
+whether or not ufw allows 80 and 443.
+
+The layer that does have to allow the traffic is the DigitalOcean cloud firewall. If one is attached
+to the droplet, add inbound rules for 80/tcp, 443/tcp and 443/udp there, otherwise Caddy cannot
+complete the ACME challenge and no certificate is issued.
 
 ### 3. DNS
 
@@ -95,7 +105,18 @@ mkdir -p ~/harmony/data
 sudo chown -R 1993:1993 ~/harmony/data
 ```
 
-### 7. Build and start
+### 7. Port check
+
+Nothing else on the droplet may hold 80 or 443. Today only 22 and 15417 listen.
+
+```sh
+sudo ss -ltnp '( sport = :80 or sport = :443 )'
+```
+
+Expect no output. If something listens, stop it or change the `caddy` port mappings in
+`compose.yaml` before continuing.
+
+### 8. Build and start
 
 ```sh
 sudo docker compose build harmony
@@ -109,7 +130,7 @@ free -m; df -h /
 `grep Revision` must print the tag from `.env`, not `unknown`; `unknown` means `DENO_DEPLOYMENT_ID`
 did not reach the image and the app is running in development mode.
 
-### 8. Reclaim build space
+### 9. Reclaim build space
 
 ```sh
 sudo docker builder prune -f
@@ -176,19 +197,30 @@ Keep the previous image until the new revision is verified (see Notes).
 cd ~/harmony
 git checkout <previous tag>
 sed -i 's/^HARMONY_REVISION=.*/HARMONY_REVISION=<previous tag>/' .env
-sudo docker compose up -d --build
+sudo docker compose up -d
 ```
 
-If the previous image is still present locally, the build is a cache hit and the rollback is
-immediate.
+No `--build`: the previous revision's image is tagged `waxnerd/harmony:<previous tag>` and is still
+on the droplet, so Compose starts it as is. This is why the Notes below say to keep the previous
+image.
 
 ## Remove
 
 ```sh
 cd ~/harmony
-sudo docker compose down -v --rmi local
-cd ~ && rm -rf ~/harmony          # copy data/ out first if it is worth keeping
+sudo docker compose down -v --rmi all
+cd ~ && sudo rm -rf ~/harmony     # copy data/ out first if it is worth keeping
 ```
+
+`--rmi all` rather than `--rmi local`: `compose.yaml` sets an explicit `image:` name, so Compose does
+not treat the Harmony image as locally built and `--rmi local` leaves it behind. To remove any
+stragglers from earlier revisions:
+
+```sh
+sudo docker image rm $(sudo docker images -q 'waxnerd/harmony')
+```
+
+`sudo` on the `rm -rf`: `data/` is owned by uid 1993, not by `bttf`.
 
 Then delete the Cloudflare `harmony` A record and the ufw (and cloud firewall) rules for 80 and 443.
 

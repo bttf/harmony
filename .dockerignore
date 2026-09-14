@@ -2,7 +2,7 @@
 .github
 .vscode
 .env
-_fresh/
+**/_fresh/
 data/
 snaps.db
 snaps/

@@ -6,6 +6,8 @@ RUN deno cache server/main.ts cli.ts
 # Fresh ahead-of-time build (islands + static assets) into _fresh/.
 RUN deno task build
 ARG HARMONY_REVISION
+# An empty DENO_DEPLOYMENT_ID would silently start the app in development mode.
+RUN test -n "$HARMONY_REVISION"
 ENV DENO_DEPLOYMENT_ID=${HARMONY_REVISION} \
     PORT=8000 \
     HARMONY_DATA_DIR=/data
