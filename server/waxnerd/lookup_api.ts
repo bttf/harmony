@@ -1,11 +1,17 @@
 import { createReleaseSeed } from '@/musicbrainz/seeding.ts';
 import { createReleasePermalink } from '@/server/permalink.ts';
-import { LookupError, ProviderError } from '@/utils/errors.ts';
+import { CompatibilityError, LookupError, ProviderError } from '@/utils/errors.ts';
 import { ResponseError as SnapResponseError } from 'snap-storage';
 import { simplifyName } from 'utils/string/simplify.js';
 
 import type { MetadataProvider } from '@/providers/base.ts';
-import type { ArtistCreditName, MergedHarmonyRelease, ProviderReleaseErrorMap } from '@/harmonizer/types.ts';
+import type {
+	ArtistCreditName,
+	IncompatibilityInfo,
+	MergedHarmonyRelease,
+	ProviderMessage,
+	ProviderReleaseErrorMap,
+} from '@/harmonizer/types.ts';
 import type { FormDataRecord } from 'utils/types.d.ts';
 
 /** Request body of the Waxnerd release lookup endpoint. */
@@ -55,7 +61,12 @@ export interface HarmonyLookupResponse {
 	/** MBID of an existing MusicBrainz release, if one was found. */
 	existingMbid: string | null;
 	existingMbidSource: 'url' | 'lookup' | null;
-	/** Indicates whether the MusicBrainz URL relationships could be checked at all. */
+	/**
+	 * Indicates whether the MusicBrainz URL relationships could be checked at all.
+	 *
+	 * This is `false` if the MusicBrainz API failed as well as if its rate limit was hit, which the
+	 * resolver reports as a warning instead of an error.
+	 */
 	existingMbidChecked: boolean;
 	linkedReleases: HarmonyLinkedRelease[];
 	providers: HarmonyLookupProviderResult[];
@@ -170,6 +181,36 @@ export function selectProviders(
 	return selected;
 }
 
+/** Start of the warning which `resolveReleaseMbids` pushes when it hits the MusicBrainz API rate limit. */
+const musicbrainzRateLimitWarning = 'Some MusicBrainz URL lookups were skipped because the API rate limit was hit';
+
+/**
+ * Checks whether the MusicBrainz resolver reported that it hit the API rate limit.
+ *
+ * `resolveReleaseMbids` swallows a `RateLimitError` and only pushes a warning message, so the
+ * messages which it appended are the only signal that no lookup was performed.
+ *
+ * @param messages - Release messages after the resolver ran.
+ * @param previousMessageCount - Number of messages before the resolver ran.
+ */
+export function hitMusicBrainzRateLimit(messages: ProviderMessage[], previousMessageCount: number): boolean {
+	return messages.slice(previousMessageCount).some((message) =>
+		message.type === 'warning' && message.text.startsWith(musicbrainzRateLimitWarning)
+	);
+}
+
+/** Describes why the data of one provider was dropped from the merged release. */
+function describeIncompatibility(
+	incompatibility: IncompatibilityInfo,
+	incompatibleValue: string | number,
+): string {
+	let description = `Incompatible data was ignored: ${incompatibility.reason} (${incompatibleValue}`;
+	if (incompatibility.compatibleValue !== undefined) {
+		description += `, expected ${incompatibility.compatibleValue}`;
+	}
+	return `${description})`;
+}
+
 /** Joins the given artist credit into a single string, the same way the web UI renders it. */
 export function formatArtistCredit(artists: ArtistCreditName[]): string {
 	const lastIndex = artists.length - 1;
@@ -265,6 +306,26 @@ export function buildLookupResponse(input: LookupResponseInput): HarmonyLookupRe
 	const warnings = release.info.messages
 		.filter((message) => message.type === 'warning' || message.type === 'error')
 		.map((message) => message.provider ? `${message.provider}: ${message.text}` : message.text);
+
+	// Providers whose data is incompatible with the primary provider are deleted from the release map
+	// before the merge, so their only remaining trace is the incompatibility info.
+	for (const incompatibility of release.info.incompatibleData) {
+		for (const cluster of incompatibility.clusters) {
+			const description = describeIncompatibility(incompatibility, cluster.incompatibleValue);
+			for (const providerInfo of cluster.providers) {
+				providerResults.push({
+					name: providerInfo.name,
+					internalName: providerInfo.internalName,
+					id: providerInfo.id,
+					url: providerInfo.url,
+					lookedUp: true,
+					error: description,
+				});
+				warnings.push(`${providerInfo.name}: ${description}`);
+			}
+		}
+	}
+
 	if (!mbidsResolved) {
 		warnings.push('Existing MusicBrainz releases could not be checked, the MusicBrainz URL lookup failed');
 	}
@@ -313,6 +374,10 @@ export function mapLookupError(
 	}
 	if (cause instanceof ProviderError) {
 		return { status: 502, body: { error: cause.message, code: 'provider_error', provider: cause.providerName } };
+	}
+	if (cause instanceof CompatibilityError) {
+		// The providers disagree about the release, which says nothing about the requested URL.
+		return { status: 502, body: { error: cause.message, code: 'provider_error' } };
 	}
 	if (cause instanceof LookupError) {
 		return { status: 400, body: { error: cause.message, code: 'unsupported_url' } };

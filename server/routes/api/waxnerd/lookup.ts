@@ -6,6 +6,7 @@ import { isAuthorized, unauthorized, waxnerdApiSecret } from '@/server/waxnerd/a
 import {
 	buildLookupResponse,
 	classifyReleaseUrl,
+	hitMusicBrainzRateLimit,
 	jsonResponse,
 	mapLookupError,
 	parseLookupRequest,
@@ -79,17 +80,29 @@ export const handler: Handlers = {
 			try {
 				const lookup = new CombinedReleaseLookup({ urls: [url] }, options);
 				releaseMap = await lookup.getCompleteProviderReleaseMapping();
-				release = await lookup.getMergedRelease({ prefer: defaultProviderPreferences });
+				// The requested URL decides which data is authoritative, so incompatible providers are
+				// dropped (and reported) instead of failing the whole lookup.
+				release = await lookup.getMergedRelease({
+					prefer: defaultProviderPreferences,
+					primaryProvider: inputProvider.name,
+				});
 			} catch (error) {
 				const { status, body: errorBody } = mapLookupError(error, inputProvider.name);
+				if (status === 500) log.error(error);
 				logResult(status, url);
 				return jsonResponse(errorBody, status);
 			}
 
 			// Duplicate detection is a nice to have, a failing MusicBrainz API must not fail the whole lookup.
+			const messageCount = release.info.messages.length;
 			let mbidsResolved = true;
 			try {
 				await resolveReleaseMbids(release);
+				// A hit rate limit is swallowed by the resolver, which only appends a warning message.
+				if (hitMusicBrainzRateLimit(release.info.messages, messageCount)) {
+					mbidsResolved = false;
+					log.warn(`Resolving MBIDs for ${url} hit the MusicBrainz API rate limit`);
+				}
 			} catch (error) {
 				mbidsResolved = false;
 				log.warn(`Resolving MBIDs failed for ${url}: ${error instanceof Error ? error.message : error}`);

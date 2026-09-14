@@ -1,13 +1,14 @@
 import {
 	buildLookupResponse,
 	classifyReleaseUrl,
+	hitMusicBrainzRateLimit,
 	mapLookupError,
 	parseLookupRequest,
 	selectProviders,
 } from './lookup_api.ts';
 import BandcampProvider from '@/providers/Bandcamp/mod.ts';
 import { makeProviderOptions } from '@/providers/test_spec.ts';
-import { LookupError, ProviderError } from '@/utils/errors.ts';
+import { CompatibilityError, LookupError, ProviderError } from '@/utils/errors.ts';
 import { ResponseError as SnapResponseError } from 'snap-storage';
 import { assert } from 'std/assert/assert.ts';
 import { assertEquals } from 'std/assert/assert_equals.ts';
@@ -17,6 +18,7 @@ import { describe, it } from '@std/testing/bdd';
 
 import type { MetadataProvider } from '@/providers/base.ts';
 import type {
+	IncompatibilityInfo,
 	MergedHarmonyRelease,
 	ProviderInfo,
 	ProviderMessage,
@@ -56,7 +58,11 @@ const musicbrainzInfo: ProviderInfo = {
 	lookup: { method: 'id', value: existingMbid },
 };
 
-function makeRelease(providers: ProviderInfo[], messages: ProviderMessage[] = []): MergedHarmonyRelease {
+function makeRelease(
+	providers: ProviderInfo[],
+	messages: ProviderMessage[] = [],
+	incompatibleData: IncompatibilityInfo[] = [],
+): MergedHarmonyRelease {
 	return {
 		title: 'Darkness Is My Home',
 		artists: [
@@ -76,7 +82,7 @@ function makeRelease(providers: ProviderInfo[], messages: ProviderMessage[] = []
 			providers,
 			messages,
 			sourceMap: {},
-			incompatibleData: [],
+			incompatibleData,
 		},
 	};
 }
@@ -266,6 +272,40 @@ describe('buildLookupResponse', () => {
 		assertEquals(mbResponse.existingMbidSource, 'lookup');
 	});
 
+	it('reports providers whose data was dropped as incompatible', () => {
+		const incompatibleRelease = makeRelease([bandcampInfo], [], [{
+			reason: 'Providers have returned multiple different GTIN',
+			compatibleValue: 5054960573505,
+			clusters: [{
+				incompatibleValue: 5054960573512,
+				providers: [deezerInfo],
+			}],
+		}]);
+		// The merge deletes incompatible providers from the release map, so it does not list Deezer.
+		const incompatibleResponse = buildLookupResponse({
+			release: incompatibleRelease,
+			releaseMap: { Bandcamp: incompatibleRelease },
+			inputProvider: bandcamp,
+			redirectUrl,
+			baseUrl,
+			projectUrl,
+			mbidsResolved: true,
+		});
+
+		const description =
+			'Incompatible data was ignored: Providers have returned multiple different GTIN (5054960573512, expected 5054960573505)';
+		assertEquals(incompatibleResponse.providers.map((provider) => provider.name), ['Bandcamp', 'Deezer']);
+		assertEquals(incompatibleResponse.providers[1], {
+			name: 'Deezer',
+			internalName: 'deezer',
+			id: deezerInfo.id,
+			url: deezerInfo.url,
+			lookedUp: true,
+			error: description,
+		});
+		assertEquals(incompatibleResponse.warnings, [`Deezer: ${description}`]);
+	});
+
 	it('reports no existing MBID if nothing is linked', () => {
 		const plainRelease = makeRelease([bandcampInfo]);
 		const plainResponse = buildLookupResponse({
@@ -289,6 +329,18 @@ describe('buildLookupResponse', () => {
 });
 
 describe('mapLookupError', () => {
+	it('maps a compatibility error to a provider error', () => {
+		const result = mapLookupError(
+			new CompatibilityError('Providers have returned multiple different GTIN', {
+				reason: 'Providers have returned multiple different GTIN',
+				clusters: [],
+			}),
+			'Bandcamp',
+		);
+		assertEquals(result.status, 502);
+		assertEquals(result.body.code, 'provider_error');
+	});
+
 	it('maps a lookup error to an unsupported URL', () => {
 		const result = mapLookupError(new LookupError('No provider supports https://example.com/'), 'Bandcamp');
 		assertEquals(result.status, 400);
@@ -335,5 +387,25 @@ describe('mapLookupError', () => {
 		const result = mapLookupError('boom', 'Bandcamp');
 		assertEquals(result.status, 500);
 		assertEquals(result.body.code, 'internal');
+	});
+});
+
+describe('hitMusicBrainzRateLimit', () => {
+	const rateLimitMessage: ProviderMessage = {
+		type: 'warning',
+		text: 'Some MusicBrainz URL lookups were skipped because the API rate limit was hit:\n- Please wait.',
+	};
+
+	it('detects the warning which the resolver appended', () => {
+		assert(hitMusicBrainzRateLimit([{ type: 'debug', text: 'before' }, rateLimitMessage], 1));
+	});
+
+	it('ignores the same warning from an earlier lookup', () => {
+		assertFalse(hitMusicBrainzRateLimit([rateLimitMessage], 1));
+	});
+
+	it('ignores other messages', () => {
+		assertFalse(hitMusicBrainzRateLimit([{ type: 'warning', text: 'Some other warning' }], 0));
+		assertFalse(hitMusicBrainzRateLimit([], 0));
 	});
 });
