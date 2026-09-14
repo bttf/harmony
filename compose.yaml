@@ -1,0 +1,38 @@
+services:
+  harmony:
+    build:
+      context: .
+      args:
+        HARMONY_REVISION: ${HARMONY_REVISION:?set HARMONY_REVISION in .env}
+    image: waxnerd/harmony:${HARMONY_REVISION}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      FORWARD_PROTO: 'true'
+    volumes:
+      - ./data:/data
+    ports:
+      - '127.0.0.1:8000:8000' # local diagnostics only; public traffic enters via caddy
+    mem_limit: 512m
+    logging:
+      driver: json-file
+      options: { max-size: '10m', max-file: '5' }
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on: [harmony]
+    ports:
+      - '80:80'
+      - '443:443'
+      - '443:443/udp'
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    mem_limit: 128m
+    logging:
+      driver: json-file
+      options: { max-size: '10m', max-file: '5' }
+volumes:
+  caddy_data:
+  caddy_config:

@@ -13,3 +13,6 @@ local/
 
 # Coverage directory
 coverage/
+
+# Waxnerd deployment data directory
+/data/

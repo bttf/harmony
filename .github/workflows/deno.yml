@@ -4,7 +4,7 @@ on:
   push:
     tags: ['v*']
   pull_request:
-    branches: ['main']
+    branches: ['main', 'waxnerd']
   workflow_dispatch:
     inputs:
       perform_deploy:
