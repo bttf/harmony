@@ -92,8 +92,20 @@ cp deploy/env.example .env
 chmod 600 .env
 ```
 
-`HARMONY_REVISION` in `.env` must match the checked-out tag. No secrets are needed today: Bandcamp,
-Deezer and iTunes require no credentials, and Spotify is deferred.
+`HARMONY_REVISION` in `.env` must match the checked-out tag. Providers need no credentials today:
+Bandcamp, Deezer and iTunes are free, and Spotify is deferred.
+
+One secret is needed, `HARMONY_WAXNERD_SECRET`, the bearer token for `POST /api/waxnerd/lookup`:
+
+```sh
+openssl rand -hex 32
+```
+
+The same value has to be set as `HARMONY_WAXNERD_SECRET` in the api's Railway env. While it is
+unset, the endpoint answers 401 to every request and nothing else on the instance changes. Set it at
+the first deploy even when the checked-out tag predates the endpoint, where it is simply inert. If it
+is added to `.env` later, `sudo docker compose up -d` recreates the container so the new value is
+picked up; a restart alone does not re-read `env_file`.
 
 ### 6. Data directory
 
@@ -164,6 +176,31 @@ sudo docker builder prune -f
    ```
 
    This shows `snaps.db` and `snaps/`.
+6. The Waxnerd lookup endpoint rejects an unauthenticated request:
+
+   ```sh
+   curl -s -o /dev/null -w '%{http_code}\n' -X POST \
+     -H 'Content-Type: application/json' \
+     -d '{"url":"<Bandcamp album URL>","redirectUrl":"https://api.waxnerd.com/waxnerd/release-imports/<uuid>/callback"}' \
+     https://harmony.waxnerd.com/api/waxnerd/lookup
+   ```
+
+   This must print `401`.
+7. The Waxnerd lookup endpoint answers an authenticated request:
+
+   ```sh
+   curl -s -X POST \
+     -H "Authorization: Bearer $(grep '^HARMONY_WAXNERD_SECRET=' ~/harmony/.env | cut -d= -f2-)" \
+     -H 'Content-Type: application/json' \
+     -d '{"url":"<Bandcamp album URL>","redirectUrl":"https://api.waxnerd.com/waxnerd/release-imports/<uuid>/callback"}' \
+     https://harmony.waxnerd.com/api/waxnerd/lookup |
+     jq '{title, existingMbid, redirect_uri: .seed.redirect_uri, edit_note: .seed.edit_note}'
+   ```
+
+   `redirect_uri` must start with the `redirectUrl` that was sent, followed by a query string which
+   Harmony adds (the lookup state). `edit_note` must reference `https://harmony.waxnerd.com/release?`;
+   an `http://` value or a wrong host means `FORWARD_PROTO` or the Caddy headers are wrong. The first
+   call is slow (3-30 s) because nothing is cached yet.
 
 ## Update to a new upstream tag
 
@@ -190,6 +227,10 @@ sudo docker compose logs harmony | grep Revision
 ```
 
 Keep the previous image until the new revision is verified (see Notes).
+
+`server/fresh.gen.ts` conflicts whenever upstream adds a route or an island: keep upstream's version
+of the file and re-add the two `./routes/api/waxnerd/lookup.ts` lines (or run `deno task dev` once,
+which regenerates the manifest).
 
 ## Rollback
 
@@ -231,9 +272,10 @@ it loses nothing but re-fetch time.
 
 ## Notes
 
-- The instance is unauthenticated, the same as upstream's public instance. Anyone who reaches
+- The HTML UI is unauthenticated, the same as upstream's public instance. Anyone who reaches
   `harmony.waxnerd.com` can use it, and MusicBrainz edits are attributed to whoever is logged into
-  MusicBrainz in their own browser.
+  MusicBrainz in their own browser. `POST /api/waxnerd/lookup` is the one authenticated surface: it
+  requires `HARMONY_WAXNERD_SECRET` as a bearer token and answers 401 without it.
 - Upstream sets `"lock": false` in `deno.json`, so every image build resolves remote dependencies
   fresh and two builds of the same commit are not guaranteed to be identical. Keep the previous
   image around until a new revision is verified, so a rollback does not depend on a rebuild.
