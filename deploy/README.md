@@ -1,152 +1,75 @@
 # Waxnerd deployment
 
-This directory holds the configuration that runs this fork of Harmony at
-`https://harmony.waxnerd.com`, on the same DigitalOcean droplet as the Waxnerd MusicBrainz mirror
-(`mb.waxnerd.com`, Ubuntu 22.04). The app runs in Docker Compose behind a Caddy container that
-terminates TLS.
+This directory holds the runbook for this fork of Harmony at `https://harmony.waxnerd.com`. It runs
+as the `harmony` service in the Waxnerd Railway project (`intelligent-courage`), next to the api and
+Typesense. Railway builds the root `Dockerfile` and terminates TLS. The caller is the Waxnerd import
+app (`apps/import` in `bttf/waxnerd`), which sends `POST /api/waxnerd/lookup`.
 
-## Branches and tags
+## Branches and revisions
 
 - `main` is an untouched mirror of `kellnerd/harmony`.
 - `waxnerd` is the deployed branch and the default branch of this fork. It was created from the
   upstream tag `v2026.8.30` and carries the deployment configuration on top.
 - Upstream updates are **merged** into `waxnerd`, never rebased, so the merge base with upstream
   stays intact.
-- Deploys are marked with fork tags of the form `waxnerd-<upstream tag>-<ordinal>`, for example
-  `waxnerd-v2026.8.30-1`. The droplet checks out a tag, and `HARMONY_REVISION` in the droplet's
-  `.env` holds the same tag. Compose passes it into the image as `DENO_DEPLOYMENT_ID`, which is what
-  Harmony reports as its revision and what turns off Fresh's development mode.
+- Railway deploys every push to `waxnerd`. The Dockerfile takes the deployed commit from Railway's
+  `RAILWAY_GIT_COMMIT_SHA` build argument and passes it to the app as `DENO_DEPLOYMENT_ID`, which is
+  what Harmony reports as its revision and what turns off Fresh's development mode.
 
-## First deploy on the droplet
+## First deploy on Railway
 
-The user `bttf` is not in the `docker` group, so every `docker` command needs `sudo`.
+### 1. Service
 
-### 1. Disk pre-flight
+In the `intelligent-courage` project, production environment: New → GitHub Repo → `bttf/harmony`.
+Name the service `harmony`. In its settings:
 
-The droplet is tight on disk (the MusicBrainz mirror owns most of it).
+- Source: branch `waxnerd`.
+- Build: Dockerfile (Railway picks up the root `Dockerfile`).
+- Networking: target port `8000`.
 
-```sh
-df -h /
-sudo docker system df
-sudo docker image prune -f
-sudo docker builder prune -f
-df -h /
-free -m
+### 2. Variables
+
+| Variable | Value |
+|---|---|
+| `PORT` | `8000` |
+| `FORWARD_PROTO` | `true` |
+| `HARMONY_CODE_URL` | `https://github.com/bttf/harmony` |
+| `HARMONY_WAXNERD_SECRET` | output of `openssl rand -hex 32` |
+| `RAILWAY_RUN_UID` | `0` |
+
+`FORWARD_PROTO=true` makes Harmony build its own URLs from Railway's `X-Forwarded-Proto` header.
+Without it the seeder's `redirect_uri` and edit notes carry `http://`.
+
+`HARMONY_WAXNERD_SECRET` is the bearer token for `POST /api/waxnerd/lookup`. The same value has to
+be set as `HARMONY_WAXNERD_SECRET` in the import app's Railway env. While it is unset, the endpoint
+answers 401 to every request and nothing else on the instance changes.
+
+`RAILWAY_RUN_UID=0` runs the container as root. The image's `deno` user cannot write to a Railway
+volume, which is mounted owned by root.
+
+Providers need no credentials today: Bandcamp, Deezer and iTunes are free, and Spotify is deferred.
+
+### 3. Volume
+
+Attach a volume to the service at mount path `/data` (`HARMONY_DATA_DIR`, set in the Dockerfile).
+1 GB is enough.
+
+### 4. Domain
+
+Settings → Networking → Custom Domain → `harmony.waxnerd.com`. Railway shows a CNAME target. In
+Cloudflare, on the `waxnerd.com` zone, add a CNAME `harmony` → that target, **DNS only** (grey
+cloud), so Railway can issue the certificate.
+
+### 5. Deploy
+
+Deploy the service, then check the deploy log for the revision:
+
+```
+Revision: <commit sha, 7 characters>
 ```
 
-Proceed only with at least 5 GB free. The expected footprint of the Harmony image, the Caddy image
-and the build cache is under 1.5 GB.
-
-`free -m` matters because `deno cache` and `deno task build` run uncapped during the image build;
-the `mem_limit` in `compose.yaml` applies to the running container only. The mirror's Postgres holds
-2 GB of shared buffers, so if memory is tight, build while the mirror is idle.
-
-### 2. Firewall
-
-```sh
-sudo ufw status verbose
-```
-
-If ufw is active, open the web ports:
-
-```sh
-sudo ufw allow 80/tcp
-sudo ufw allow 443/tcp
-sudo ufw allow 443/udp
-```
-
-Those ufw rules are for consistency, not for reachability: Docker publishes ports through its own
-`DOCKER` chain in `nat`/`FORWARD`, which bypasses ufw's `INPUT` chain, so the containers are reachable
-whether or not ufw allows 80 and 443.
-
-The layer that does have to allow the traffic is the DigitalOcean cloud firewall. If one is attached
-to the droplet, add inbound rules for 80/tcp, 443/tcp and 443/udp there, otherwise Caddy cannot
-complete the ACME challenge and no certificate is issued.
-
-### 3. DNS
-
-In Cloudflare, on the `waxnerd.com` zone, add an A record `harmony` → `146.190.166.125`, **DNS only**
-(grey cloud), matching how `mb` is configured. Caddy issues its own certificate, so the record must
-not be proxied.
-
-```sh
-dig +short harmony.waxnerd.com
-```
-
-Wait until that prints `146.190.166.125` before starting the containers.
-
-### 4. Clone the fork
-
-```sh
-cd ~
-git clone --branch waxnerd https://github.com/bttf/harmony.git harmony
-cd ~/harmony
-git fetch --tags
-git checkout waxnerd-v2026.8.30-1
-```
-
-### 5. Environment file
-
-```sh
-cp deploy/env.example .env
-chmod 600 .env
-```
-
-`HARMONY_REVISION` in `.env` must match the checked-out tag. Providers need no credentials today:
-Bandcamp, Deezer and iTunes are free, and Spotify is deferred.
-
-One secret is needed, `HARMONY_WAXNERD_SECRET`, the bearer token for `POST /api/waxnerd/lookup`:
-
-```sh
-openssl rand -hex 32
-```
-
-The same value has to be set as `HARMONY_WAXNERD_SECRET` in the api's Railway env. While it is
-unset, the endpoint answers 401 to every request and nothing else on the instance changes. Set it at
-the first deploy even when the checked-out tag predates the endpoint, where it is simply inert. If it
-is added to `.env` later, `sudo docker compose up -d` recreates the container so the new value is
-picked up; a restart alone does not re-read `env_file`.
-
-### 6. Data directory
-
-The container runs as the base image's `deno` user, uid/gid 1993, so the bind-mounted data directory
-has to be owned by that uid on the host.
-
-```sh
-mkdir -p ~/harmony/data
-sudo chown -R 1993:1993 ~/harmony/data
-```
-
-### 7. Port check
-
-Nothing else on the droplet may hold 80 or 443. Today only 22 and 15417 listen.
-
-```sh
-sudo ss -ltnp '( sport = :80 or sport = :443 )'
-```
-
-Expect no output. If something listens, stop it or change the `caddy` port mappings in
-`compose.yaml` before continuing.
-
-### 8. Build and start
-
-```sh
-sudo docker compose build harmony
-sudo docker compose up -d
-sudo docker compose ps
-sudo docker compose logs harmony | grep Revision
-sudo docker compose logs caddy | grep -i -E 'certificate obtained|error'
-free -m; df -h /
-```
-
-`grep Revision` must print the tag from `.env`, not `unknown`; `unknown` means `DENO_DEPLOYMENT_ID`
-did not reach the image and the app is running in development mode.
-
-### 9. Reclaim build space
-
-```sh
-sudo docker builder prune -f
-```
+`unknown` means `DENO_DEPLOYMENT_ID` did not reach the image and the app is running in development
+mode.
 
 ## Smoke tests
 
@@ -160,73 +83,48 @@ sudo docker builder prune -f
    ```
 
    This must print an `https://harmony.waxnerd.com/release/actions?...` value. An `http://` value or
-   a wrong host means `FORWARD_PROTO` or the Caddy headers are wrong.
+   a wrong host means `FORWARD_PROTO` is not set.
 3. `https://harmony.waxnerd.com/release/actions?release_mbid=<MBID>` renders the actions page for an
    existing MusicBrainz release.
-4. HTTP redirects to HTTPS:
-
-   ```sh
-   curl -I http://harmony.waxnerd.com
-   ```
-
-5. Persistent data is being written:
-
-   ```sh
-   ls ~/harmony/data
-   ```
-
-   This shows `snaps.db` and `snaps/`.
-6. The Waxnerd lookup endpoint rejects an unauthenticated request:
+4. Persistent data is being written: after test 1, `railway ssh --service harmony ls /data` shows
+   `snaps.db` and `snaps/`.
+5. The Waxnerd lookup endpoint rejects an unauthenticated request:
 
    ```sh
    curl -s -o /dev/null -w '%{http_code}\n' -X POST \
      -H 'Content-Type: application/json' \
-     -d '{"url":"<Bandcamp album URL>","redirectUrl":"https://api.waxnerd.com/waxnerd/release-imports/<uuid>/callback"}' \
+     -d '{"url":"<Bandcamp album URL>","redirectUrl":"https://import.waxnerd.com/release-imports/rows/<uuid>/callback"}' \
      https://harmony.waxnerd.com/api/waxnerd/lookup
    ```
 
    This must print `401`.
-7. The Waxnerd lookup endpoint answers an authenticated request:
+6. The Waxnerd lookup endpoint answers an authenticated request:
 
    ```sh
    curl -s -X POST \
-     -H "Authorization: Bearer $(grep '^HARMONY_WAXNERD_SECRET=' ~/harmony/.env | cut -d= -f2-)" \
+     -H "Authorization: Bearer $HARMONY_WAXNERD_SECRET" \
      -H 'Content-Type: application/json' \
-     -d '{"url":"<Bandcamp album URL>","redirectUrl":"https://api.waxnerd.com/waxnerd/release-imports/<uuid>/callback"}' \
+     -d '{"url":"<Bandcamp album URL>","redirectUrl":"https://import.waxnerd.com/release-imports/rows/<uuid>/callback"}' \
      https://harmony.waxnerd.com/api/waxnerd/lookup |
      jq '{title, existingMbid, redirect_uri: .seed.redirect_uri, edit_note: .seed.edit_note}'
    ```
 
+   Export `HARMONY_WAXNERD_SECRET` in the shell first, with the value from the service's variables.
    `redirect_uri` must start with the `redirectUrl` that was sent, followed by a query string which
    Harmony adds (the lookup state). `edit_note` must reference `https://harmony.waxnerd.com/release?`;
-   an `http://` value or a wrong host means `FORWARD_PROTO` or the Caddy headers are wrong. The first
+   an `http://` value or a wrong host means `FORWARD_PROTO` is not set. The first
    call is slow (3-30 s) because nothing is cached yet.
 
 ## Update to a new upstream tag
 
 ```sh
-# on a workstation
 cd /path/to/harmony
 git fetch upstream --tags
 git checkout waxnerd
 git merge <new upstream tag>       # merge, never rebase
-# resolve conflicts, then push and tag the deploy
+# resolve conflicts, then push; Railway deploys the new head of waxnerd
 git push origin waxnerd
-git tag waxnerd-<new upstream tag>-1
-git push origin waxnerd-<new upstream tag>-1
 ```
-
-```sh
-# on the droplet
-cd ~/harmony
-git fetch --tags
-git checkout waxnerd-<new upstream tag>-1
-sed -i 's/^HARMONY_REVISION=.*/HARMONY_REVISION=waxnerd-<new upstream tag>-1/' .env
-sudo docker compose up -d --build
-sudo docker compose logs harmony | grep Revision
-```
-
-Keep the previous image until the new revision is verified (see Notes).
 
 `server/fresh.gen.ts` conflicts whenever upstream adds a route or an island: keep upstream's version
 of the file and re-add the two `./routes/api/waxnerd/lookup.ts` lines (or run `deno task dev` once,
@@ -234,41 +132,29 @@ which regenerates the manifest).
 
 ## Rollback
 
-```sh
-cd ~/harmony
-git checkout <previous tag>
-sed -i 's/^HARMONY_REVISION=.*/HARMONY_REVISION=<previous tag>/' .env
-sudo docker compose up -d
-```
+In the Railway dashboard, open the `harmony` service's Deployments tab and redeploy the previous
+successful deployment. Railway reuses that deployment's image, so a rollback does not depend on a
+rebuild. Then revert the bad commit on `waxnerd`, or the next push redeploys it.
 
-No `--build`: the previous revision's image is tagged `waxnerd/harmony:<previous tag>` and is still
-on the droplet, so Compose starts it as is. This is why the Notes below say to keep the previous
-image.
+## Local run
+
+`compose.yaml` builds the same image and runs it on `127.0.0.1:8000` in production mode:
+
+```sh
+cp deploy/env.example .env
+docker compose up --build
+```
 
 ## Remove
 
-```sh
-cd ~/harmony
-sudo docker compose down -v --rmi all
-cd ~ && sudo rm -rf ~/harmony     # copy data/ out first if it is worth keeping
-```
-
-`--rmi all` rather than `--rmi local`: `compose.yaml` sets an explicit `image:` name, so Compose does
-not treat the Harmony image as locally built and `--rmi local` leaves it behind. To remove any
-stragglers from earlier revisions:
-
-```sh
-sudo docker image rm $(sudo docker images -q 'waxnerd/harmony')
-```
-
-`sudo` on the `rm -rf`: `data/` is owned by uid 1993, not by `bttf`.
-
-Then delete the Cloudflare `harmony` A record and the ufw (and cloud firewall) rules for 80 and 443.
+Delete the `harmony` service (with its volume) in the Railway dashboard, then delete the Cloudflare
+`harmony` CNAME.
 
 ## Data
 
-`data/` holds `snaps.db` and `snaps/`, Harmony's cache of provider snapshots. It is a cache: deleting
-it loses nothing but re-fetch time.
+`/data` holds `snaps.db` and `snaps/`, Harmony's cache of provider snapshots. Permalinks point at
+these snapshots. It is a cache: losing it loses nothing but re-fetch time, and old permalinks then
+show freshly fetched data.
 
 ## Notes
 
@@ -277,7 +163,7 @@ it loses nothing but re-fetch time.
   MusicBrainz in their own browser. `POST /api/waxnerd/lookup` is the one authenticated surface: it
   requires `HARMONY_WAXNERD_SECRET` as a bearer token and answers 401 without it.
 - Upstream sets `"lock": false` in `deno.json`, so every image build resolves remote dependencies
-  fresh and two builds of the same commit are not guaranteed to be identical. Keep the previous
-  image around until a new revision is verified, so a rollback does not depend on a rebuild.
+  fresh and two builds of the same commit are not guaranteed to be identical. Roll back by
+  redeploying an earlier Railway deployment, not by rebuilding an older commit.
 - The `denoland/deno` pin in the `Dockerfile` should be bumped when upstream CI's Deno minor version
   moves (`.github/workflows/deno.yml`, `deno-version`).
