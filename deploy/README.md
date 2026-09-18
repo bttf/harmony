@@ -29,13 +29,13 @@ Name the service `harmony`. In its settings:
 
 ### 2. Variables
 
-| Variable | Value |
-|---|---|
-| `PORT` | `8000` |
-| `FORWARD_PROTO` | `true` |
-| `HARMONY_CODE_URL` | `https://github.com/bttf/harmony` |
-| `HARMONY_WAXNERD_SECRET` | output of `openssl rand -hex 32` |
-| `RAILWAY_RUN_UID` | `0` |
+| Variable                 | Value                             |
+| ------------------------ | --------------------------------- |
+| `PORT`                   | `8000`                            |
+| `FORWARD_PROTO`          | `true`                            |
+| `HARMONY_CODE_URL`       | `https://github.com/bttf/harmony` |
+| `HARMONY_WAXNERD_SECRET` | output of `openssl rand -hex 32`  |
+| `RAILWAY_RUN_UID`        | `0`                               |
 
 `FORWARD_PROTO=true` makes Harmony build its own URLs from Railway's `X-Forwarded-Proto` header.
 Without it the seeder's `redirect_uri` and edit notes carry `http://`.
@@ -61,6 +61,9 @@ Cloudflare, on the `waxnerd.com` zone, add a CNAME `harmony` → that target, **
 cloud), so Railway can issue the certificate.
 
 ### 5. Deploy
+
+Connecting the repo in step 1 starts a build, and steps 2–4 each trigger a redeploy. Check the
+latest deployment once all four are done.
 
 Deploy the service, then check the deploy log for the revision:
 
