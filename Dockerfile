@@ -5,7 +5,9 @@ COPY . .
 RUN deno cache server/main.ts cli.ts
 # Fresh ahead-of-time build (islands + static assets) into _fresh/.
 RUN deno task build
-ARG HARMONY_REVISION
+# Railway passes the deployed commit as RAILWAY_GIT_COMMIT_SHA; local Compose builds pass HARMONY_REVISION.
+ARG RAILWAY_GIT_COMMIT_SHA
+ARG HARMONY_REVISION=${RAILWAY_GIT_COMMIT_SHA}
 # An empty DENO_DEPLOYMENT_ID would silently start the app in development mode.
 RUN test -n "$HARMONY_REVISION"
 ENV DENO_DEPLOYMENT_ID=${HARMONY_REVISION} \

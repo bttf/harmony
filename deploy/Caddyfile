@@ -1,3 +1,0 @@
-harmony.waxnerd.com {
-    reverse_proxy harmony:8000
-}
