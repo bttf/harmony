@@ -65,7 +65,7 @@ cloud), so Railway can issue the certificate.
 Connecting the repo in step 1 starts a build, and steps 2–4 each trigger a redeploy. Check the
 latest deployment once all four are done.
 
-Deploy the service, then check the deploy log for the revision:
+The deploy log prints the revision:
 
 ```
 Revision: <commit sha, 7 characters>
